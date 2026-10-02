@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kudos</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 0; background: #f4f6f8; color: #1d2733; }
+  header { background: #12305a; color: #fff; padding: 12px 16px; display: flex; flex-wrap: wrap; gap: 8px; justify-content: space-between; align-items: center; }
+  main { max-width: 720px; margin: 0 auto; padding: 16px; }
+  .card { background: #fff; border-radius: 8px; padding: 16px; margin-bottom: 16px; box-shadow: 0 1px 2px rgba(0,0,0,.08); }
+  label { display: block; font-weight: 600; margin: 8px 0 4px; }
+  select, textarea, button { font: inherit; padding: 8px; border-radius: 6px; border: 1px solid #b8c2cc; }
+  select, textarea { width: 100%; box-sizing: border-box; }
+  button { background: #12305a; color: #fff; border: 0; cursor: pointer; }
+  button.secondary { background: #e3e8ee; color: #1d2733; }
+  .error { color: #b3261e; } .muted { color: #5b6875; font-size: .9em; } .hidden-item { opacity: .55; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+</style>
+</head>
+<body>
+<header>
+  <strong>Kudos</strong>
+  {% if user %}
+    <form method="post" action="/logout">{{ user.name }}{% if user.is_admin %} (admin){% endif %} <button class="secondary">Sign out</button></form>
+  {% else %}
+    <form method="post" action="/login">
+      <select name="user_id" aria-label="Sign in as" style="width:auto">{% for u in users %}<option value="{{ u.id }}">{{ u.name }}</option>{% endfor %}</select>
+      <button class="secondary">Sign in</button>
+    </form>
+  {% endif %}
+</header>
+<main>
+  {% if user %}
+  <section class="card">
+    <h2>Give kudos</h2>
+    <form id="kudos-form">
+      <label for="recipient">Colleague</label>
+      <select id="recipient" required></select>
+      <label for="message">Message</label>
+      <textarea id="message" rows="3" maxlength="{{ max_length }}" required></textarea>
+      <div class="muted"><span id="count">0</span>/{{ max_length }}</div>
+      <p id="form-error" class="error" role="alert"></p>
+      <button>Send kudos</button>
+    </form>
+  </section>
+  {% endif %}
+  <section class="card">
+    <h2>Recent kudos</h2>
+    <div id="feed"></div>
+    <button id="more" class="secondary" hidden>Show more</button>
+  </section>
+</main>
+<script>
+const isAdmin = {{ 'true' if user and user.is_admin else 'false' }};
+const signedIn = {{ 'true' if user else 'false' }};
+let page = 1;
+
+// Build one feed item. textContent is used so messages can never run as HTML.
+function renderItem(k) {
+  const item = document.createElement('div');
+  item.className = 'card' + (k.is_visible === false ? ' hidden-item' : '');
+  const title = document.createElement('strong');
+  title.textContent = k.sender + ' → ' + k.recipient;
+  const message = document.createElement('p');
+  message.textContent = k.message;
+  const when = document.createElement('div');
+  when.className = 'muted';
+  when.textContent = new Date(k.created_at).toLocaleString() + (k.is_visible === false ? ' · hidden' : '');
+  item.append(title, message, when);
+  if (isAdmin) {
+    const row = document.createElement('div'); row.className = 'row';
+    const toggle = document.createElement('button'); toggle.className = 'secondary';
+    toggle.textContent = k.is_visible === false ? 'Restore' : 'Hide';
+    toggle.onclick = () => moderate(k.id, k.is_visible === false);
+    const remove = document.createElement('button'); remove.className = 'secondary'; remove.textContent = 'Delete';
+    remove.onclick = () => { if (confirm('Delete this kudos permanently?')) removeKudos(k.id); };
+    row.append(toggle, remove); item.append(row);
+  }
+  return item;
+}
+
+// Load the feed. Admins get every kudos (including hidden); everyone else gets the public feed.
+async function loadFeed(reset) {
+  const feed = document.getElementById('feed');
+  if (reset) { page = 1; feed.replaceChildren(); }
+  if (isAdmin) {
+    const items = await (await fetch('/api/admin/kudos')).json();
+    feed.replaceChildren(...items.map(renderItem));
+  } else {
+    const data = await (await fetch('/api/kudos?page=' + page)).json();
+    data.items.forEach(k => feed.append(renderItem(k)));
+    document.getElementById('more').hidden = !data.has_more;
+  }
+  if (!feed.children.length) feed.textContent = 'No kudos yet. Be the first!';
+}
+
+async function moderate(id, makeVisible) {
+  const reason = makeVisible ? '' : (prompt('Reason for hiding (optional):') || '');
+  await fetch('/api/admin/kudos/' + id, { method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ is_visible: makeVisible, reason }) });
+  loadFeed(true);
+}
+async function removeKudos(id) { await fetch('/api/admin/kudos/' + id, { method: 'DELETE' }); loadFeed(true); }
+
+document.getElementById('more').onclick = () => { page += 1; loadFeed(false); };
+
+if (signedIn) {
+  // Fill the colleague dropdown
+  fetch('/api/users').then(r => r.json()).then(users => {
+    const select = document.getElementById('recipient');
+    users.forEach(u => select.add(new Option(u.name, u.id)));
+  });
+  const message = document.getElementById('message');
+  message.oninput = () => document.getElementById('count').textContent = message.value.length;
+  document.getElementById('kudos-form').onsubmit = async (event) => {
+    event.preventDefault();
+    const response = await fetch('/api/kudos', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ recipient_id: Number(document.getElementById('recipient').value), message: message.value }) });
+    const error = document.getElementById('form-error');
+    if (response.ok) { message.value = ''; document.getElementById('count').textContent = 0; error.textContent = ''; loadFeed(true); }
+    else { error.textContent = (await response.json()).error; }
+  };
+}
+loadFeed(true);
+</script>
+</body>
+</html>
